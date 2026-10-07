@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "o4fix"
+dynamic = ["version"]
+description = "Repair and check the gyro track of DJI O4 Air Unit (Pro) videos recorded with the ICM-40609-D gyro"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Vadim Bryl" }]
+keywords = ["dji", "o4", "fpv", "gyro", "gyroflow", "stabilization", "icm-40609-d"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = ["numpy>=1.22", "scipy>=1.8"]
+
+[project.optional-dependencies]
+tools = ["opencv-python-headless>=4.6", "orangebox>=0.5", "matplotlib>=3.5"]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+o4fix = "o4fix.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/vadimbryl/o4fix"
+Issues = "https://github.com/vadimbryl/o4fix/issues"
+
+[tool.hatch.version]
+path = "src/o4fix/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/o4fix"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "NPY", "SIM"]
+ignore = ["B008"]  # frozen Settings() defaults are intentional
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

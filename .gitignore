@@ -1,0 +1,22 @@
+# research material: recordings, firmware, datasheets, notes (not redistributable / too large)
+research/
+*.MP4
+*.mp4
+*.MOV
+*.BFL
+*.bfl
+*.BBL
+*.bbl
+*.bin
+*.sig
+*.pdf
+*.npz
+*.gcsv
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# os
+.DS_Store
