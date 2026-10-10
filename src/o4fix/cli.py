@@ -9,7 +9,7 @@ import sys
 import numpy as np
 
 from . import __version__
-from .correct import Settings, correct
+from .correction import Settings, correct
 from .dji import QUAT_RATE_HZ, TrackError, read_track, write_track
 
 

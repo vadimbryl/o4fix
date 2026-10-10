@@ -27,17 +27,19 @@ pipx install git+https://github.com/vadimbryl/o4fix      # or: pip install git+h
 o4fix fix DJI_20260513161109_0059_D.MP4                    # writes DJI_20260513161109_0059_D_o4fix.MP4
 ```
 
-Options: `-o OUT.MP4`, `--force` (overwrite an existing output), `--dry-run`, and the tuning parameters `--impulse-thr` (60 °/s), `--lpf` (10 Hz), `--busy-lpf` (3 Hz) and `--pullback-tau` (12.5 s).
+Options: `-o OUT.MP4`, `--force` (overwrite an existing output), `--dry-run`, and the tuning parameters `--impulse-thr` (60 °/s), `--lpf` (20 Hz), `--busy-lpf` (3 Hz) and `--pullback-tau` (12.5 s).
 
 Results against references:
 
 | | As recorded | o4fix |
 | --- | --- | --- |
 | Bench clip, false step left after the event | 11.8° | 0.3° or less |
-| Flight vs blackbox, false rotation per video frame (p99 / max) | 1.75° / 4.90° | 0.53° / 1.76° |
+| Public flight vs blackbox, false rotation per video frame (p99 / max) | 1.75° / 4.93° | 0.45° / 1.81° |
+| Second airframe, worst flight vs blackbox (p99 / max) | 0.30° / 4.11° | 0.19° / 0.69° |
+| Clean clips (no false events) | unchanged | unchanged |
 
 **Limits:**
-- o4fix removes most of the false motion, not all of it. About 1 s of sustained false rate and about 1° of slow wobble remain on the hardest full-throttle segments.
+- o4fix removes most of the false motion, not all of it. Sustained false rates and some slow wobble remain on the hardest full-throttle segments.
 - Footage recorded with RockSteady on cannot be repaired.
 
 ## This is a workaround, not a fix
@@ -79,7 +81,7 @@ The tests use a synthetic MP4 with a DJI attitude track, so no recordings are ne
 | Path | Contents |
 | --- | --- |
 | `src/o4fix/dji.py` | MP4 and protobuf parsing, in-place patching of the attitude track |
-| `src/o4fix/correct.py` | Removal of false bursts and of the fusion pull-back, adaptive low-pass |
+| `src/o4fix/correction.py` | Removal of false bursts and of the fusion pull-back, adaptive low-pass |
 | `src/o4fix/quat.py` | Quaternion helpers |
 | `src/o4fix/static_check.py`, `src/o4fix/blackbox.py` | `check-static` and `compare-blackbox` |
 | `src/o4fix/cli.py` | Command line |

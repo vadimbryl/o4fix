@@ -58,7 +58,7 @@ A second run, with throttle jerks reaching only about 510 Hz, showed no event. R
 
 ## 4. Flight data against a blackbox
 
-**Dataset.** A public O4 Air Unit Pro sample from the Feb 2026 batch: 135 s of flight, RockSteady off, Betaflight blackbox with gyro at 8 kHz. The camera stream was synchronised to the blackbox (correlation 0.97). The fixed camera-to-FC rotation was fitted: 180° about roll plus about 25° uptilt. "False rotation" below means camera attitude minus flight-controller attitude.
+**Dataset.** A public O4 Air Unit Pro sample from the Feb 2026 batch: 135 s of flight, RockSteady off, Betaflight blackbox with gyro at 8 kHz. The camera stream was synchronised to the blackbox (correlation 0.98), including the drift between the two clocks, which is about 1 ms per second and would otherwise misalign long clips by tenths of a second. The fixed camera-to-FC rotation was fitted: 180° about roll plus about 25° uptilt. "False rotation" below means camera attitude minus flight-controller attitude.
 
 ![Flight: false rotation before and after o4fix](figures/flight_false_rotation.png)
 
@@ -70,7 +70,7 @@ A second run, with throttle jerks reaching only about 510 Hz, showed no event. R
 | --- | --- |
 | Shape | Short bursts on exactly one gyro axis (axis purity 0.99) |
 | Size | Clusters around 0.65°, then 1.3° and 2.0° |
-| Per video frame | 99th percentile 1.75°, maximum 4.9° |
+| Per video frame | 99th percentile 1.75°, maximum 4.93° |
 | Above 10 Hz | Camera reports 5–14 °/s; the FC sees 0.3–1.7 °/s; coherence between them 0.01–0.04 |
 
 **Dependence on load:**
@@ -84,32 +84,43 @@ A second run, with throttle jerks reaching only about 510 Hz, showed no event. R
 
 **The accelerometer is not the source.** A tilt correction from the accelerometer can only rotate about horizontal axes. The impulse axes are spread like random sensor axes: 39% near horizontal against 33% for a random axis, and 20% close to vertical.
 
-**Second airframe.** A second O4 Air Unit Pro was recorded with RockSteady on, so only per-frame attitude was available. Its false rotation rose from about 5 °/s RMS at cruise (motors at 160–220 Hz) to 200–690 °/s RMS with the motors at 500–540 Hz. That fits the motor-speed sensitivity seen on the bench.
+**Second airframe.** Three clips from two more flights on another O4 Air Unit Pro (2026 batch), each with a Betaflight blackbox:
+
+| Clip | Length | False rotation per frame, p99 / max | Notes |
+| --- | --- | --- | --- |
+| Flight 1, part 1 | 285 s | 0.30° / 4.11° | Two episodes of dense alternating false rates on one axis, ±100–300 °/s for 0.6–1.5 s while the FC sees under 10 °/s |
+| Flight 1, part 2 | 237 s | 0.05° / 0.18° | Clean |
+| Flight 2 | 96 s | 0.06° / 0.36° | Clean |
+
+The same unit, recorded earlier with RockSteady on (per-frame attitude only), showed false rotation rising from about 5 °/s RMS at cruise (motors at 160–220 Hz) to 200–690 °/s RMS with the motors at 500–540 Hz. The fault is intermittent: on this airframe most flying is clean, and the false content arrives in episodes.
 
 **Ruled out:** aliasing of motor tones. No relation between the false content and k·f_motor ± n·f_s was found for sample rates from 250 to 1100 Hz.
 
 ## 5. Repairing recorded footage: o4fix
 
-Without raw gyro samples, what the gyro lost cannot be recovered exactly. Most of the false motion has a recognisable structure, though, and [o4fix](../src/o4fix/correct.py) removes it in three steps:
+Without raw gyro samples, what the gyro lost cannot be recovered exactly. Most of the false motion has a recognisable structure, though, and [o4fix](../src/o4fix/correction.py) removes it in three steps:
 
-1. **Bursts.** Impulses on one axis that stand out from the running median while the other axes stay quiet are grouped into bursts when they are less than 80 ms apart. Each burst is replaced by a straight line between the clean rates just before and after it.
+1. **Bursts.** Impulses on one axis that stand out from the running median, while the other axes stay comparatively quiet, are grouped into bursts when they are less than 80 ms apart, or up to 120 ms apart when the rate in between jitters sample to sample like false content (a real manoeuvre is smooth at 1 kHz). Each burst is replaced by a straight line between the clean rates just before and after it.
 2. **Fusion pull-back.** Each removed burst would otherwise leave its exponential pull-back (τ = 12.5 s) as an opposite drift, so that pull-back is subtracted too.
-3. **Dense segments.** Where removal is heavy, typically at full throttle, the low-pass cutoff moves from 10 Hz to 3 Hz.
+3. **Smoothing.** A zero-phase 20 Hz low-pass, moving to 3 Hz where removal is heavy, typically at full throttle.
 
 The corrected quaternions are written back into a copy of the MP4 at the same byte positions, so Gyroflow reads it as a normal DJI file.
 
 | Result | As recorded | o4fix |
 | --- | --- | --- |
 | Bench clip: false step removed | 0° | 11.84° of 11.84° |
-| Bench clip: error after the event, at 20.2 / 30 / 47 s | −11.8° / −5.7° / −4.0° | −0.14° / −0.02° / +0.26° |
-| Flight: false rotation per frame, p99 / max | 1.75° / 4.90° | 0.53° / 1.76° |
-| Flight, camera Y axis: false rotation RMS at 0.1–0.3 / 0.3–1 / 1–3 / 3–10 Hz | 6.67° / 1.80° / 0.45° / 0.17° | 3.33° / 1.25° / 0.22° / 0.05° |
+| Bench clip: error after the event, at 20.2 / 30 / 47 s | −11.8° / −5.4° / −1.0° | −0.14° / −0.02° / +0.26° |
+| Public flight: false rotation per frame, p99 / max | 1.75° / 4.93° | 0.45° / 1.81° |
+| Public flight, camera Y axis: false rotation RMS at 0.1–0.3 / 0.3–1 / 1–3 / 3–10 Hz | 6.77° / 1.77° / 0.44° / 0.16° | 2.02° / 0.62° / 0.13° / 0.03° |
+| Second airframe, flight 1 part 1: per frame p99 / max | 0.30° / 4.11° | 0.19° / 0.69° |
+| Second airframe, clean clips: per frame p99 / max | 0.05–0.06° / 0.18–0.36° | 0.05–0.06° / 0.20° |
 
 Bench errors are measured against the video and exclude the 0.1 °/s bias drift. Flight figures are measured against the blackbox with `o4fix compare-blackbox` ([source](../src/o4fix/blackbox.py)).
 
-**Limits.** Two kinds of false motion remain:
-- **Sustained false rates.** About 1 s of +60–70 °/s on one axis at 34–36 s of the flight sample is not impulse-like enough to be removed.
-- **Slow wobble.** About 1° RMS below 2 Hz on the hardest segments, where it overlaps real motion.
+**Limits.** Some false motion remains:
+- **Sustained false rates.** About 1 s of +60–70 °/s on one axis at 34–36 s of the public sample is not impulse-like enough to be removed.
+- **Slow wobble.** About 2° RMS below 0.3 Hz on the worst axis of the public sample, where it overlaps real motion.
+- **Tuning data.** Parameters were chosen on four clips from two airframes; other frames, mounts and settings may need different values.
 
 The gyro bias drift is left alone. Footage recorded with RockSteady on cannot be repaired, because the correction is already baked into the image.
 

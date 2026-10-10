@@ -15,10 +15,9 @@ import numpy as np
 from scipy.signal import butter, sosfiltfilt
 
 from . import quat
-from .correct import Settings, correct
+from .correction import Settings, correct
 from .dji import QUAT_RATE_HZ, read_track
 
-CAMERA_CLOCK_HZ = 1000.2
 VIDEO_FRAME_RATE_HZ = 59.94
 REPORT_BANDS_HZ = ((0.1, 0.3), (0.3, 1.0), (1.0, 3.0), (3.0, 10.0))
 DEBUG_MODE_GYRO_SCALED = "6"
@@ -33,11 +32,15 @@ class Blackbox:
 
 @dataclass
 class Sync:
-    """Camera time + offset_s = blackbox time; camera rates ~= FC rates @ rotation."""
+    """Blackbox time = offset_s + clock_ratio * camera time; camera rates ~= FC rates @ rotation."""
 
     offset_s: float
+    clock_ratio: float
     rotation: np.ndarray
     correlation: float
+
+    def blackbox_time(self, camera_time_s: np.ndarray) -> np.ndarray:
+        return self.offset_s + self.clock_ratio * camera_time_s
 
 
 @dataclass
@@ -77,40 +80,76 @@ def _best_orthogonal_map(source: np.ndarray, target: np.ndarray) -> np.ndarray:
     return u @ vt
 
 
-def synchronise(camera_rates_dps: np.ndarray, blackbox: Blackbox, search_s: float = 10.0) -> Sync:
-    """Find the time offset by correlating rate magnitudes, then refine it with the axis-resolved fit."""
-    camera_time = (np.arange(len(camera_rates_dps)) + 0.5) / CAMERA_CLOCK_HZ
-    camera = _lowpass(camera_rates_dps, CAMERA_CLOCK_HZ, 20.0)
-    fc = _lowpass(blackbox.gyro_dps, 1.0 / np.median(np.diff(blackbox.time_s)), 20.0)
-    end_s = blackbox.time_s[-1]
+def _rates_at(blackbox: Blackbox, rates_dps: np.ndarray, times_s: np.ndarray) -> np.ndarray:
+    return np.stack([np.interp(times_s, blackbox.time_s, rates_dps[:, axis]) for axis in range(3)], axis=1)
 
-    def fc_rates_at(times):
-        return np.stack([np.interp(times, blackbox.time_s, fc[:, axis]) for axis in range(3)], axis=1)
 
-    best_correlation, coarse_offset = -np.inf, None
-    for offset in np.arange(-search_s, search_s, 0.01):
-        times = camera_time[::10] + offset
-        overlap = (times > 0) & (times < end_s)
-        if overlap.sum() < 0.5 * len(times):
+def _coarse_offset(camera_dps: np.ndarray, camera_time: np.ndarray, blackbox: Blackbox, fc_dps: np.ndarray):
+    """Best offset of the camera clip inside the whole log, from 20 Hz rate-magnitude envelopes."""
+    step_s = 0.05
+    grid = np.arange(0.0, blackbox.time_s[-1], step_s)
+    fc_envelope = np.interp(grid, blackbox.time_s, np.linalg.norm(fc_dps, axis=1))
+    camera_envelope = np.interp(
+        np.arange(0.0, camera_time[-1], step_s), camera_time, np.linalg.norm(camera_dps, axis=1)
+    )
+    best_correlation, best_offset = -np.inf, None
+    for shift in range(-len(camera_envelope) // 2, len(grid) - len(camera_envelope) // 2):
+        first, last = max(0, -shift), min(len(camera_envelope), len(grid) - shift)
+        if last - first < min(0.5 * len(camera_envelope), 0.9 * len(grid)):
             continue
-        correlation = np.corrcoef(
-            np.linalg.norm(fc_rates_at(times[overlap]), axis=1), np.linalg.norm(camera[::10][overlap], axis=1)
-        )[0, 1]
+        correlation = np.corrcoef(camera_envelope[first:last], fc_envelope[first + shift : last + shift])[0, 1]
         if correlation > best_correlation:
-            best_correlation, coarse_offset = correlation, offset
-    if coarse_offset is None:
+            best_correlation, best_offset = correlation, shift * step_s
+    if best_offset is None:
         raise ValueError("camera clip and blackbox do not overlap")
+    return best_offset, float(best_correlation)
 
-    best_residual, best = np.inf, None
-    for offset in np.arange(coarse_offset - 0.05, coarse_offset + 0.05, 0.0005):
-        times = camera_time + offset
-        overlap = (times > 0.5) & (times < end_s - 0.5)
-        fc_rates = fc_rates_at(times[overlap])
-        rotation = _best_orthogonal_map(fc_rates, camera[overlap])
-        residual = np.sqrt(((camera[overlap] - fc_rates @ rotation) ** 2).sum() / (camera[overlap] ** 2).sum())
-        if residual < best_residual:
-            best_residual, best = residual, (offset, rotation)
-    return Sync(best[0], best[1], float(best_correlation))
+
+def _residual(camera: np.ndarray, fc: np.ndarray) -> tuple[float, np.ndarray]:
+    rotation = _best_orthogonal_map(fc, camera)
+    return float(np.sqrt(((camera - fc @ rotation) ** 2).sum() / (camera**2).sum())), rotation
+
+
+def synchronise(camera_rates_dps: np.ndarray, blackbox: Blackbox, window_s: float = 20.0) -> Sync:
+    """Map camera time to blackbox time, including the drift between the two clocks (~0.1 %).
+
+    A coarse offset comes from the whole log; local offsets are then refined in windows along
+    the clip and fitted with a straight line; the camera-to-FC rotation is fitted last."""
+    camera_time = np.arange(len(camera_rates_dps)) / QUAT_RATE_HZ
+    camera = _lowpass(camera_rates_dps, QUAT_RATE_HZ, 20.0)
+    fc = _lowpass(blackbox.gyro_dps, 1.0 / np.median(np.diff(blackbox.time_s)), 20.0)
+    coarse_offset, correlation = _coarse_offset(
+        _lowpass(camera_rates_dps, QUAT_RATE_HZ, 5.0),
+        camera_time,
+        blackbox,
+        _lowpass(blackbox.gyro_dps, 1.0 / np.median(np.diff(blackbox.time_s)), 5.0),
+    )
+    centres, offsets = [], []
+    for start in np.arange(0.0, max(camera_time[-1] - window_s, 0.0) + 1e-9, window_s):
+        in_window = (camera_time >= start) & (camera_time < start + window_s)
+        if np.linalg.norm(camera[in_window], axis=1).mean() < 15.0:
+            continue
+        best_residual, best_offset = 0.5, None
+        for offset in np.arange(coarse_offset - 0.3, coarse_offset + 0.3, 0.002):
+            times = camera_time[in_window] + offset
+            if times[0] < 0 or times[-1] > blackbox.time_s[-1]:
+                continue
+            residual, _ = _residual(camera[in_window], _rates_at(blackbox, fc, times))
+            if residual < best_residual:
+                best_residual, best_offset = residual, offset
+        if best_offset is not None:
+            centres.append(start + window_s / 2)
+            offsets.append(best_offset)
+    if len(centres) >= 2:
+        slope, offset_s = np.polyfit(centres, offsets, 1)
+    elif centres:
+        slope, offset_s = 0.0, offsets[0]
+    else:
+        slope, offset_s = 0.0, coarse_offset
+    times = offset_s + (1.0 + slope) * camera_time
+    overlap = (times > 0.5) & (times < blackbox.time_s[-1] - 0.5)
+    _, rotation = _residual(camera[overlap], _rates_at(blackbox, fc, times[overlap]))
+    return Sync(float(offset_s), float(1.0 + slope), rotation, correlation)
 
 
 def false_rotation(camera_rates_dps: np.ndarray, reference_dps: np.ndarray, valid: np.ndarray) -> FalseRotation:
@@ -132,15 +171,12 @@ def compare_blackbox(
     recorded = quat.body_rates(samples, QUAT_RATE_HZ)
     blackbox = load_blackbox(log, log_index)
     sync = synchronise(recorded, blackbox)
-    times = (np.arange(len(recorded)) + 0.5) / CAMERA_CLOCK_HZ + sync.offset_s
+    times = sync.blackbox_time((np.arange(len(recorded)) + 0.5) / QUAT_RATE_HZ)
     valid = (times > 0.5) & (times < blackbox.time_s[-1] - 0.5)
-    fc_in_camera_axes = (
-        np.stack([np.interp(times, blackbox.time_s, blackbox.gyro_dps[:, axis]) for axis in range(3)], axis=1)
-        @ sync.rotation
-    )
+    fc_in_camera_axes = _rates_at(blackbox, blackbox.gyro_dps, times) @ sync.rotation
     print(
         f"blackbox field {blackbox.gyro_field}; offset {sync.offset_s:+.3f} s; "
-        f"sync correlation {sync.correlation:.2f}; camera-to-FC rotation det {np.linalg.det(sync.rotation):+.0f}"
+        f"clock drift {(sync.clock_ratio - 1) * 1000:+.2f} ms/s; sync correlation {sync.correlation:.2f}"
     )
     corrected = quat.body_rates(correct(samples, QUAT_RATE_HZ, settings).quats, QUAT_RATE_HZ)
     for label, rates in (("as recorded", recorded), ("o4fix", corrected)):

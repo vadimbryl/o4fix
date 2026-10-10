@@ -21,7 +21,7 @@ class Settings:
     """Correction parameters. A value of 0 disables the corresponding step."""
 
     impulse_threshold_dps: float = 60.0
-    lowpass_hz: float = 10.0
+    lowpass_hz: float = 20.0
     busy_lowpass_hz: float = 3.0
     pullback_tau_s: float = 12.5
 
@@ -47,21 +47,23 @@ def remove_impulses(
     rates_dps: np.ndarray,
     rate_hz: float,
     threshold_dps: float = 60.0,
-    purity: float = 0.35,
+    purity: float = 0.6,
     median_window_ms: float = 61,
     padding_samples: int = 3,
     min_width_ms: float = 2,
     max_width_ms: float = 25,
     min_area_deg: float = 0.25,
     merge_gap_ms: float = 80,
+    noisy_merge_gap_ms: float = 120,
     edge_window_ms: float = 15,
 ) -> tuple[np.ndarray, list[Burst]]:
     """Remove false single-axis impulse bursts from body rates of shape (N, 3).
 
     An impulse is a run where one axis departs from its running median by more than
     `threshold_dps` while the other two stay below `purity` of that deviation. Impulses on one
-    axis closer than `merge_gap_ms` form a burst, and the whole burst, including the false
-    shelves between impulses, is replaced by a straight line between the clean rates around it.
+    axis form a burst when they are closer than `merge_gap_ms`, or closer than
+    `noisy_merge_gap_ms` with jittery false content in between. The whole burst, including the
+    false shelves between impulses, is replaced by a straight line between the clean rates around it.
     """
     window = int(median_window_ms * rate_hz / 1000) | 1
     baseline = median_filter(rates_dps, size=(window, 1), mode="nearest")
@@ -69,6 +71,7 @@ def remove_impulses(
     cleaned = rates_dps.copy()
     bursts: list[Burst] = []
     merge_gap = int(merge_gap_ms * rate_hz / 1000)
+    noisy_merge_gap = int(noisy_merge_gap_ms * rate_hz / 1000)
     edge = max(int(edge_window_ms * rate_hz / 1000), 1)
     last = len(rates_dps) - 1
 
@@ -92,7 +95,9 @@ def remove_impulses(
 
         merged: list[list[int]] = []
         for start, end in sorted(spans):
-            if merged and start - merged[-1][1] <= merge_gap:
+            if merged and _mergeable(
+                rates_dps[merged[-1][1] : start + 1, axis], merge_gap, noisy_merge_gap, threshold_dps
+            ):
                 merged[-1][1] = max(merged[-1][1], end)
             else:
                 merged.append([start, end])
@@ -100,13 +105,26 @@ def remove_impulses(
         for start, end in merged:
             before = rates_dps[max(start - edge, 0) : start, axis]
             after = rates_dps[end + 1 : end + 1 + edge, axis]
-            rate_before = float(np.median(before)) if len(before) else float(baseline[start, axis])
-            rate_after = float(np.median(after)) if len(after) else float(baseline[end, axis])
+            rate_before = float(np.median(before)) if len(before) else None
+            rate_after = float(np.median(after)) if len(after) else None
+            if rate_before is None and rate_after is None:
+                continue
+            rate_before = rate_after if rate_before is None else rate_before
+            rate_after = rate_before if rate_after is None else rate_after
             replacement = np.linspace(rate_before, rate_after, end - start + 1)
             removed_deg = float((rates_dps[start : end + 1, axis] - replacement).sum() / rate_hz)
             bursts.append(Burst(start, end, axis, removed_deg))
             cleaned[start : end + 1, axis] = replacement
     return cleaned, bursts
+
+
+def _mergeable(gap_rates: np.ndarray, merge_gap: int, noisy_merge_gap: int, threshold_dps: float) -> bool:
+    """Bursts merge across short gaps, and across longer ones only when the gap itself jitters
+    sample to sample like false content does; a real manoeuvre is smooth at 1 kHz."""
+    gap = len(gap_rates) - 1
+    if gap <= merge_gap:
+        return True
+    return gap <= noisy_merge_gap and np.abs(np.diff(gap_rates)).mean() > threshold_dps / 8
 
 
 def remove_pullback(rates_dps: np.ndarray, removed_dps: np.ndarray, rate_hz: float, tau_s: float) -> np.ndarray:

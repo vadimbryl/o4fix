@@ -1,7 +1,7 @@
 import numpy as np
 
 from o4fix import quat
-from o4fix.correct import Settings, correct, remove_impulses, remove_pullback
+from o4fix.correction import Settings, correct, remove_impulses, remove_pullback
 
 RATE = 1000.0
 
@@ -63,3 +63,37 @@ def test_correct_removes_false_step_from_attitude():
     raw = quat.relative_attitude_deg(quat.multiply(quat.conjugate(truth), q))
     assert np.abs(raw[-1]).max() > 7.0
     assert np.abs(err[-1]).max() < 0.5
+
+
+def false_episode(n, start, axis, length_ms=600, amplitude=250.0, seed=3):
+    """Dense alternating false rates on one axis, like the long episodes on some units."""
+    rng = np.random.default_rng(seed)
+    out = np.zeros((n, 3))
+    position = start
+    while position < start + length_ms - 20:
+        width = rng.integers(4, 10)
+        out[position : position + width, axis] = amplitude * rng.choice([-1, 1]) * rng.uniform(0.4, 1.0)
+        position += width + rng.integers(5, 40)
+    return out
+
+
+def test_long_false_episode_is_removed_as_one_burst():
+    rates = real_motion()
+    episode = false_episode(len(rates), 1200, axis=0)
+    cleaned, bursts = remove_impulses(rates + episode, RATE)
+    assert len([b for b in bursts if b.axis == 0]) <= 2
+    leftover_deg = np.abs(np.cumsum((cleaned - rates)[:, 0]) / RATE).max()
+    assert leftover_deg < 1.0
+
+
+def test_fast_real_ramp_between_bursts_is_kept():
+    n = 6000
+    t = np.arange(n) / RATE
+    rates = np.zeros((n, 3))
+    rates[:, 2] = 700.0 / (1 + np.exp(-(t - 3.0) / 0.03))  # smooth 0 -> 700 deg/s ramp around 3 s
+    rates += false_burst(n, 2900, axis=2, area_deg=2.0) + false_burst(n, 3080, axis=2, area_deg=2.0)
+    truth = np.zeros((n, 3))
+    truth[:, 2] = 700.0 / (1 + np.exp(-(t - 3.0) / 0.03))
+    cleaned, _ = remove_impulses(rates, RATE)
+    kept_deg = (cleaned[2950:3060, 2] - truth[2950:3060, 2]).sum() / RATE
+    assert abs(kept_deg) < 1.0

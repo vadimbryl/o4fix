@@ -22,7 +22,7 @@ from scipy.ndimage import maximum_filter1d  # noqa: E402
 from scipy.signal import butter, sosfiltfilt  # noqa: E402
 
 from o4fix import QUAT_RATE_HZ, correct, quat, read_track  # noqa: E402
-from o4fix.blackbox import CAMERA_CLOCK_HZ, load_blackbox, synchronise  # noqa: E402
+from o4fix.blackbox import load_blackbox, synchronise  # noqa: E402
 from o4fix.static_check import video_motion  # noqa: E402
 
 # Light-mode reference palette: series slots 1-3, then ink, grid and surface tokens.
@@ -139,11 +139,11 @@ def flight_figure(clip: Path, log: Path, out: Path) -> None:
     fixed = quat.body_rates(correct(samples, QUAT_RATE_HZ).quats, QUAT_RATE_HZ)
     blackbox = load_blackbox(log)
     sync = synchronise(rates, blackbox)
-    t = (np.arange(len(rates)) + 0.5) / CAMERA_CLOCK_HZ
-    valid = (t + sync.offset_s > 0.5) & (t + sync.offset_s < blackbox.time_s[-1] - 0.5)
+    t = (np.arange(len(rates)) + 0.5) / QUAT_RATE_HZ
+    t_fc = sync.blackbox_time(t)
+    valid = (t_fc > 0.5) & (t_fc < blackbox.time_s[-1] - 0.5)
     fc_in_camera_axes = (
-        np.stack([np.interp(t + sync.offset_s, blackbox.time_s, blackbox.gyro_dps[:, k]) for k in range(3)], axis=1)
-        @ sync.rotation
+        np.stack([np.interp(t_fc, blackbox.time_s, blackbox.gyro_dps[:, k]) for k in range(3)], axis=1) @ sync.rotation
     )
     highpass = butter(2, 0.1 / (QUAT_RATE_HZ / 2), "high", output="sos")
 
@@ -159,7 +159,7 @@ def flight_figure(clip: Path, log: Path, out: Path) -> None:
     names = parser.field_names
     cols = [names.index("time")] + [names.index(f"accSmooth[{k}]") for k in range(3)]
     acc = np.asarray([[f.data[c] for c in cols] for f in parser.frames()], dtype=float)
-    t_acc = (acc[:, 0] - acc[0, 0]) / 1e6 - sync.offset_s
+    t_acc = ((acc[:, 0] - acc[0, 0]) / 1e6 - sync.offset_s) / sync.clock_ratio
     load = maximum_filter1d(np.linalg.norm(acc[:, 1:], axis=1) / float(parser.headers.get("acc_1G", 2048)), 200)
 
     fig, top, bottom = two_panels(5.2)
